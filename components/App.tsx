@@ -32,6 +32,15 @@ import type {
 const YEAR = taxYear();
 const QUARTERS = quartersForYear(YEAR);
 
+function firstDayOfCurrentMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function currentMonthDate() {
+  return firstDayOfCurrentMonth().replace(/-01$/, "-15");
+}
+
 type AnyRec = Record<string, any>;
 
 interface AppProps {
@@ -350,21 +359,58 @@ class AppInner extends React.Component<AppProps, AppState> {
 
   async set401k(v: string) {
     const val = parseInt(v) || 0;
-    this.setState((s) => ({ settings: { ...s.settings, solo401kMonthly: val } }));
-    this.repo.updateSettings({ solo401kMonthly: val });
-    // Update untouched monthly rows to the new default, in state + storage.
-    const updates: string[] = [];
-    this.setState((s) => {
-      const list = s.deductions.map((d) => {
-        if (d.k401 && !d.edited) {
-          updates.push(d.id);
-          return { ...d, amount: val };
-        }
-        return d;
-      });
-      return { deductions: list };
+    const effectiveFrom = firstDayOfCurrentMonth();
+    this.setState((s) => ({
+      settings: {
+        ...s.settings,
+        solo401kMonthly: val,
+        solo401kEffectiveFrom: effectiveFrom,
+      },
+    }));
+    this.repo.updateSettings({
+      solo401kMonthly: val,
+      solo401kEffectiveFrom: effectiveFrom,
     });
-    for (const id of updates) await this.repo.saveDeduction({ id, k401: false, amount: val, category: "Retirement — Solo 401(k)", date: undefined } as any);
+
+    const currentMonth = effectiveFrom.slice(0, 7);
+    const currentMonthAutoExists = this.state.deductions.some(
+      (d) => d.k401 && d.date.slice(0, 7) === currentMonth
+    );
+    const updates = this.state.deductions.filter(
+      (d) => d.k401 && !d.edited && d.date.slice(0, 7) >= currentMonth
+    );
+    const deductions = this.state.deductions.map((d) => {
+      const month = d.date.slice(0, 7);
+      if (d.k401 && !d.edited && month >= currentMonth) {
+        return { ...d, amount: val };
+      }
+      return d;
+    });
+    this.setState({ deductions });
+
+    for (const d of updates) {
+      await this.repo.saveAuto401k({ id: d.id, date: d.date, amount: val });
+    }
+
+    if (!currentMonthAutoExists) {
+      const date = currentMonthDate();
+      const id = await this.repo.saveAuto401k({ date, amount: val });
+      this.setState((s) => ({
+        deductions: [
+          {
+            id,
+            date,
+            amount: val,
+            category: "Retirement - Solo 401(k)",
+            note: "Monthly contribution",
+            receipt: null,
+            k401: true,
+            edited: false,
+          },
+          ...s.deductions,
+        ].sort((a, b) => (b.date || "").localeCompare(a.date || "")),
+      }));
+    }
   }
 
   card(children: any, extra?: AnyRec) {
@@ -674,7 +720,7 @@ class AppInner extends React.Component<AppProps, AppState> {
     const retirementCard = this.card(
       [
         h("div", { key: "h", style: { display: "flex", alignItems: "center", gap: "9px", margin: "0 0 4px" } }, h("span", { style: { width: "9px", height: "9px", borderRadius: "3px", background: "var(--acc-cred)" } }), h("h3", { style: { margin: 0, fontSize: "15px", fontWeight: 700 } }, "Retirement — Solo 401(k)")),
-        h("p", { key: "p", style: { margin: "0 0 20px", fontSize: "13px", color: "var(--muted)", lineHeight: 1.55 } }, "A fixed contribution is posted to Deductions automatically each month. Change any single month’s amount on the Deductions page — edited months keep their value."),
+        h("p", { key: "p", style: { margin: "0 0 20px", fontSize: "13px", color: "var(--muted)", lineHeight: 1.55 } }, "A fixed contribution is posted to Deductions automatically from the current month forward. Earlier months are treated as history unless you edit them directly."),
         field("Monthly contribution", h("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, h("div", { style: { position: "relative", display: "inline-flex", alignItems: "center" } }, h("span", { style: { position: "absolute", left: "14px", color: "var(--muted)", fontSize: "14px" } }, "$"), h("input", { type: "number", value: s.solo401kMonthly, onChange: (e: any) => this.set401k(e.target.value), style: { width: "150px", padding: "11px 14px 11px 26px", border: "1px solid var(--border)", borderRadius: "11px", fontSize: "14px" } })), h("span", { style: { color: "var(--muted)", fontSize: "13px" } }, "per month"))),
         h("div", { key: "s", style: { display: "flex", alignItems: "center", gap: "9px", marginTop: "2px", padding: "11px 13px", background: "var(--surface2)", borderRadius: "11px", fontSize: "12.5px", color: "var(--soft)" } }, this.ic(["M20 12V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h6", "M4 9h16", "M15 16l2 2 4-4"], { width: 15, height: 15, stroke: "var(--acc-cred)" }), h("span", {}, this.fmt(c.k401) + " contributed year-to-date across " + this.state.deductions.filter((d) => d.k401).length + " months — this lowers your taxable income in the estimate.")),
       ],

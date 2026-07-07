@@ -35,12 +35,31 @@ function mapSettings(row: Record<string, unknown>): Settings {
     cmeTarget: Number(row.cme_target ?? 100),
     cycleEnds: String(row.cycle_ends ?? "2027-06-30"),
     solo401kMonthly: Number(row.solo401k_monthly ?? 2500),
+    solo401kEffectiveFrom: String(
+      row.solo401k_effective_from ?? firstDayOfCurrentMonth()
+    ),
     physicianName: (row.physician_name as string) ?? "Physician",
     spouseWages: Number(row.spouse_wages ?? 0),
     spouseFedWithheld: Number(row.spouse_fed_withheld ?? 0),
     spouseStateWithheld: Number(row.spouse_state_withheld ?? 0),
     otherWithheld: Number(row.other_withheld ?? 0),
   };
+}
+
+function firstDayOfCurrentMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function monthIndex(date: string) {
+  const [year, month] = date.slice(0, 7).split("-").map(Number);
+  return year * 12 + month - 1;
+}
+
+function monthKeyFromIndex(index: number) {
+  const year = Math.floor(index / 12);
+  const month = (index % 12) + 1;
+  return `${year}-${String(month).padStart(2, "0")}`;
 }
 
 /** Load the signed-in user's full dataset, seeding + syncing on first use. */
@@ -60,8 +79,14 @@ export async function getAppData(
 
   const settings = mapSettings(settingsRow as Record<string, unknown>);
 
-  // Ensure a monthly Solo 401(k) deduction exists for every month up to now.
-  await sync401k(supabase, userId, settings.solo401kMonthly, false);
+  // Ensure monthly Solo 401(k) rows exist from the configured start month onward.
+  await sync401k(
+    supabase,
+    userId,
+    settings.solo401kMonthly,
+    settings.solo401kEffectiveFrom,
+    false
+  );
 
   const [income, deductions, cme, credentials, quarters] = await Promise.all([
     supabase.from("income").select("*").eq("user_id", userId),
@@ -183,19 +208,22 @@ async function seedUser(supabase: SupabaseClient, userId: string) {
 }
 
 /**
- * Ensure a Solo 401(k) deduction row exists for each month Jan..current of the
- * current year. When `updateUnedited` is true, untouched monthly rows are reset
- * to the new default; edited rows keep their own amount.
+ * Ensure a Solo 401(k) deduction row exists for each month from the configured
+ * effective month through the current month. When `updateUnedited` is true,
+ * untouched monthly rows in that window are reset to the new default; edited
+ * rows keep their own amount.
  */
 export async function sync401k(
   supabase: SupabaseClient,
   userId: string,
   monthly: number,
+  effectiveFrom: string,
   updateUnedited: boolean
 ) {
-  const now = new Date();
-  const year = now.getFullYear();
-  const upTo = now.getMonth(); // 0-based; include through current month
+  const currentMonth = monthIndex(firstDayOfCurrentMonth());
+  const startMonth = monthIndex(effectiveFrom);
+
+  if (startMonth > currentMonth) return;
 
   const { data: existing } = await supabase
     .from("deductions")
@@ -210,8 +238,8 @@ export async function sync401k(
 
   const toInsert: Record<string, unknown>[] = [];
   const toUpdate: string[] = [];
-  for (let m = 0; m <= upTo; m++) {
-    const ym = `${year}-${String(m + 1).padStart(2, "0")}`;
+  for (let m = startMonth; m <= currentMonth; m++) {
+    const ym = monthKeyFromIndex(m);
     const found = byMonth.get(ym);
     if (!found) {
       toInsert.push({

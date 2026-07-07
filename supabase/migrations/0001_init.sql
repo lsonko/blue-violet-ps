@@ -15,6 +15,7 @@ create table if not exists public.settings (
   cme_target           integer not null default 100,
   cycle_ends           date    not null default '2027-06-30',
   solo401k_monthly     integer not null default 2500,
+  solo401k_effective_from date not null default date_trunc('month', current_date)::date,
   physician_name       text    not null default 'Dr. Alex Morgan',
   spouse_wages         integer not null default 0,
   spouse_fed_withheld  integer not null default 0,

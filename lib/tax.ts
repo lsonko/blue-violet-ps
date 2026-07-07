@@ -99,6 +99,11 @@ export function today(): Date {
   return new Date(n.getFullYear(), n.getMonth(), n.getDate());
 }
 
+function monthIndex(date: string) {
+  const [year, month] = date.slice(0, 7).split("-").map(Number);
+  return year * 12 + month - 1;
+}
+
 export function taxYear(ref: Date = today()): number {
   return ref.getFullYear();
 }
@@ -174,8 +179,14 @@ export function calc(data: AppData, ref: Date = today()): CalcResult {
   const factor = 365 / doy;
   const annNet = ytdNet * factor;
   const annIncome = ytd * factor;
-  const k401Months = data.deductions.filter((d) => d.k401).length;
-  const annK401 = k401 + set.solo401kMonthly * Math.max(0, 12 - k401Months);
+  const nextMonth = year * 12 + ref.getMonth() + 1;
+  const effectiveMonth = monthIndex(set.solo401kEffectiveFrom);
+  const taxYearEndMonth = year * 12 + 11;
+  const futureK401Months = Math.max(
+    0,
+    taxYearEndMonth - Math.max(nextMonth, effectiveMonth) + 1
+  );
+  const annK401 = k401 + set.solo401kMonthly * futureK401Months;
   const mfj = set.filingStatus === "married";
   const spouseWages = mfj ? set.spouseWages || 0 : 0;
   const spouseFedWH = mfj ? set.spouseFedWithheld || 0 : 0;
