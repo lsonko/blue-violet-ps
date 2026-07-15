@@ -1,12 +1,21 @@
-// Tax engine — ported verbatim from the Blue Violet prototype's calc(),
-// with the hardcoded reference date replaced by a real, dynamic "today".
+// Tax engine — ported from the Blue Violet prototype's calc(), with the
+// hardcoded reference date replaced by a real, dynamic "today".
 //
 // Model: annualize YTD actuals (ratable projection, cf. IRS Form 2210),
 // SE tax with SS cap + uncapped Medicare + 0.9% surtax, federal + NJ bracket
 // income tax with spouse-wage stacking, Solo 401(k) as an above-the-line
-// adjustment, then level quarterly installments with elapsed-quarter catch-up.
+// adjustment (federal and NJ), then level quarterly installments with
+// elapsed-quarter catch-up.
 
 import type { AppData, FilingStatus, Settings } from "./types";
+
+/** Deduction category that marks a Solo 401(k) contribution. */
+export const K401_CATEGORY = "Retirement — Solo 401(k)";
+
+/** A deduction counts as a Solo 401(k) contribution via flag OR category. */
+export function isK401(d: { k401?: boolean; category?: string }): boolean {
+  return !!d.k401 || d.category === K401_CATEGORY;
+}
 
 export const FED: Record<
   FilingStatus,
@@ -99,13 +108,11 @@ export function today(): Date {
   return new Date(n.getFullYear(), n.getMonth(), n.getDate());
 }
 
-function monthIndex(date: string) {
-  const [year, month] = date.slice(0, 7).split("-").map(Number);
-  return year * 12 + month - 1;
-}
-
 export function taxYear(ref: Date = today()): number {
-  return ref.getFullYear();
+  // Jan 1–15 still belongs to the prior tax year: its Q4 estimate is due
+  // Jan 15, and the new year has no data to project from yet.
+  const y = ref.getFullYear();
+  return ref.getMonth() === 0 && ref.getDate() <= 15 ? y - 1 : y;
 }
 
 export function daysUntil(dateStr: string, ref: Date = today()): number {
@@ -130,11 +137,14 @@ export interface CalcResult {
   ssTax: number;
   medTax: number;
   addlMed: number;
+  /** Schedule SE tax (SS + Medicare, excl. 0.9% surtax) — ½ is deductible. */
+  seCore: number;
   seTax: number;
   mfj: boolean;
   spouseWages: number;
   spouseFedWH: number;
   spouseStateWH: number;
+  otherWithheld: number;
   householdTaxable: number;
   fedTaxTotal: number;
   njBase: number;
@@ -155,64 +165,77 @@ export interface CalcResult {
 
 export function calc(data: AppData, ref: Date = today()): CalcResult {
   const set: Settings = data.settings;
-  const year = ref.getFullYear();
+  const year = taxYear(ref);
   const QUARTERS = quartersForYear(year);
 
-  const ytd = data.income.reduce((a, b) => a + b.amount, 0);
-  const cmeCost = data.cme.reduce((a, b) => a + b.cost, 0);
-  const k401 = data.deductions
-    .filter((d) => d.k401)
-    .reduce((a, b) => a + b.amount, 0);
+  // Only records dated within the tax year count — prior-year rows must not
+  // bleed into the projection after the year rolls over.
+  const inYear = (r: { date: string }) => (r.date || "").startsWith(`${year}-`);
+  const income = data.income.filter(inYear);
+  const deductions = data.deductions.filter(inYear);
+  const cmeList = data.cme.filter(inYear);
+
+  const ytd = income.reduce((a, b) => a + b.amount, 0);
+  const cmeCost = cmeList.reduce((a, b) => a + b.cost, 0);
+  const k401 = deductions.filter(isK401).reduce((a, b) => a + b.amount, 0);
   const bizDedYtd =
-    data.deductions.filter((d) => !d.k401).reduce((a, b) => a + b.amount, 0) +
+    deductions.filter((d) => !isK401(d)).reduce((a, b) => a + b.amount, 0) +
     cmeCost;
   const totalDed = bizDedYtd + k401;
   const ytdNet = Math.max(0, ytd - bizDedYtd);
 
-  // 1) Annualize YTD actuals (ratable projection, cf. IRS Form 2210)
-  const doy = Math.max(
-    1,
-    Math.floor(
-      (ref.getTime() - new Date(`${year}-01-01T00:00:00`).getTime()) / 86400000
-    ) + 1
+  // 1) Annualize YTD actuals (ratable projection, cf. IRS Form 2210).
+  // During Jan 1–15 the ref date is past the tax year's end, so doy caps at 365.
+  const doy = Math.min(
+    365,
+    Math.max(
+      1,
+      Math.floor(
+        (ref.getTime() - new Date(`${year}-01-01T00:00:00`).getTime()) /
+          86400000
+      ) + 1
+    )
   );
   const factor = 365 / doy;
   const annNet = ytdNet * factor;
   const annIncome = ytd * factor;
-  const nextMonth = year * 12 + ref.getMonth() + 1;
-  const effectiveMonth = monthIndex(set.solo401kEffectiveFrom);
-  const taxYearEndMonth = year * 12 + 11;
-  const futureK401Months = Math.max(
-    0,
-    taxYearEndMonth - Math.max(nextMonth, effectiveMonth) + 1
-  );
-  const annK401 = k401 + set.solo401kMonthly * futureK401Months;
+  const k401Months = new Set(
+    deductions.filter(isK401).map((d) => (d.date || "").slice(0, 7))
+  ).size;
+  const annK401 = k401 + set.solo401kMonthly * Math.max(0, 12 - k401Months);
   const mfj = set.filingStatus === "married";
   const spouseWages = mfj ? set.spouseWages || 0 : 0;
   const spouseFedWH = mfj ? set.spouseFedWithheld || 0 : 0;
   const spouseStateWH = mfj ? set.spouseStateWithheld || 0 : 0;
+  const otherWithheld = set.otherWithheld || 0;
 
   // 2) SE tax: SS capped at wage base; Medicare uncapped; 0.9% surtax above threshold.
+  // seCore is Schedule SE tax — only half of THAT is deductible; the 0.9%
+  // Additional Medicare surtax (Form 8959) is never deductible.
   const seBase = annNet * 0.9235;
   const ssTax = Math.min(seBase, SS_WAGE_BASE) * 0.124;
   const medTax = seBase * 0.029;
   const addlMed =
     0.009 * Math.max(0, seBase + spouseWages - MEDICARE_ADDL[set.filingStatus]);
-  const seTax = ssTax + medTax + addlMed;
+  const seCore = ssTax + medTax;
+  const seTax = seCore + addlMed;
 
-  // 3) Federal income tax: ½ SE and Solo 401(k) deducted above the line; spouse wages stack.
+  // 3) Federal income tax: ½ SE (excl. surtax) and Solo 401(k) deducted above
+  // the line; spouse wages stack. Spouse + other withholding is subtracted.
   const fs = FED[set.filingStatus];
   const fedTaxable = Math.max(
     0,
-    annNet - seTax / 2 - annK401 + spouseWages - fs.std
+    annNet - seCore / 2 - annK401 + spouseWages - fs.std
   );
   const fedTaxTotal = bracketTax(fedTaxable, fs.b);
-  const fedTax = Math.max(0, fedTaxTotal - spouseFedWH);
+  const fedTax = Math.max(0, fedTaxTotal - spouseFedWH - otherWithheld);
 
-  // 4) NJ: filing-status brackets; no std deduction, no ½-SE, no 401(k) — only personal exemption.
+  // 4) NJ: filing-status brackets; qualified self-employed 401(k) contributions
+  // are deductible (N.J.S.A. 54A:6-21), but no std deduction and no ½-SE —
+  // only the personal exemption.
   const njB = mfj ? NJ_M : NJ_S;
   const njExempt = mfj ? 2000 : 1000;
-  const njBase = Math.max(0, annNet + spouseWages - njExempt);
+  const njBase = Math.max(0, annNet - annK401 + spouseWages - njExempt);
   const stateTaxTotal = bracketTax(njBase, njB);
   const stateTax = Math.max(0, stateTaxTotal - spouseStateWH);
 
@@ -247,11 +270,13 @@ export function calc(data: AppData, ref: Date = today()): CalcResult {
     ssTax,
     medTax,
     addlMed,
+    seCore,
     seTax,
     mfj,
     spouseWages,
     spouseFedWH,
     spouseStateWH,
+    otherWithheld,
     householdTaxable: fedTaxable,
     fedTaxTotal,
     njBase,

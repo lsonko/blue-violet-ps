@@ -16,7 +16,6 @@ export interface Settings {
   cmeTarget: number;
   cycleEnds: string;
   solo401kMonthly: number;
-  solo401kEffectiveFrom: string;
   physicianName: string;
   spouseWages: number;
   spouseFedWithheld: number;

@@ -1,6 +1,6 @@
 // Demo dataset for a first-time physician account, ported from the prototype.
-// The monthly Solo 401(k) rows are NOT seeded here. The app creates automatic
-// rows only from the configured effective month onward.
+// The monthly Solo 401(k) rows are NOT seeded here — the 401(k) auto-sync
+// generates them up to the current month so there is a single source of truth.
 
 export const SEED_SETTINGS = {
   filing_status: "single",
