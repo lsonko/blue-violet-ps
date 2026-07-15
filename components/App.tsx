@@ -7,6 +7,7 @@ import { logo, ic, iconFor } from "./ui";
 import { fmt, fmt2, fdate } from "@/lib/format";
 import {
   calc,
+  isK401,
   FED,
   NJ_S,
   NJ_M,
@@ -31,15 +32,6 @@ import type {
 
 const YEAR = taxYear();
 const QUARTERS = quartersForYear(YEAR);
-
-function firstDayOfCurrentMonth() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-}
-
-function currentMonthDate() {
-  return firstDayOfCurrentMonth().replace(/-01$/, "-15");
-}
 
 type AnyRec = Record<string, any>;
 
@@ -320,7 +312,12 @@ class AppInner extends React.Component<AppProps, AppState> {
     if ("amount" in rec) rec.amount = parseFloat(rec.amount) || 0;
     if ("cost" in rec) rec.cost = parseFloat(rec.cost) || 0;
     if ("hours" in rec) rec.hours = parseFloat(rec.hours) || 0;
-    if (rec.k401) rec.edited = true;
+    // A deduction categorized "Retirement — Solo 401(k)" IS a 401(k)
+    // contribution — carry the flag so calc() and the dashboard count it.
+    if (type === "deductions" && isK401(rec)) {
+      rec.k401 = true;
+      rec.edited = true;
+    }
 
     // Persist, then reflect in local state.
     let id = editId as string | null;
@@ -359,58 +356,21 @@ class AppInner extends React.Component<AppProps, AppState> {
 
   async set401k(v: string) {
     const val = parseInt(v) || 0;
-    const effectiveFrom = firstDayOfCurrentMonth();
-    this.setState((s) => ({
-      settings: {
-        ...s.settings,
-        solo401kMonthly: val,
-        solo401kEffectiveFrom: effectiveFrom,
-      },
-    }));
-    this.repo.updateSettings({
-      solo401kMonthly: val,
-      solo401kEffectiveFrom: effectiveFrom,
+    this.setState((s) => ({ settings: { ...s.settings, solo401kMonthly: val } }));
+    this.repo.updateSettings({ solo401kMonthly: val });
+    // Update untouched monthly rows to the new default, in state + storage.
+    const updates: string[] = [];
+    this.setState((s) => {
+      const list = s.deductions.map((d) => {
+        if (d.k401 && !d.edited) {
+          updates.push(d.id);
+          return { ...d, amount: val };
+        }
+        return d;
+      });
+      return { deductions: list };
     });
-
-    const currentMonth = effectiveFrom.slice(0, 7);
-    const currentMonthAutoExists = this.state.deductions.some(
-      (d) => d.k401 && d.date.slice(0, 7) === currentMonth
-    );
-    const updates = this.state.deductions.filter(
-      (d) => d.k401 && !d.edited && d.date.slice(0, 7) >= currentMonth
-    );
-    const deductions = this.state.deductions.map((d) => {
-      const month = d.date.slice(0, 7);
-      if (d.k401 && !d.edited && month >= currentMonth) {
-        return { ...d, amount: val };
-      }
-      return d;
-    });
-    this.setState({ deductions });
-
-    for (const d of updates) {
-      await this.repo.saveAuto401k({ id: d.id, date: d.date, amount: val });
-    }
-
-    if (!currentMonthAutoExists) {
-      const date = currentMonthDate();
-      const id = await this.repo.saveAuto401k({ date, amount: val });
-      this.setState((s) => ({
-        deductions: [
-          {
-            id,
-            date,
-            amount: val,
-            category: "Retirement - Solo 401(k)",
-            note: "Monthly contribution",
-            receipt: null,
-            k401: true,
-            edited: false,
-          },
-          ...s.deductions,
-        ].sort((a, b) => (b.date || "").localeCompare(a.date || "")),
-      }));
-    }
+    for (const id of updates) await this.repo.updateDeductionAmount(id, val);
   }
 
   card(children: any, extra?: AnyRec) {
@@ -616,7 +576,7 @@ class AppInner extends React.Component<AppProps, AppState> {
     const list = this.state.deductions;
     const c = this.calc();
     const catColor = "var(--acc-ded)";
-    const rows = list.map((x: any) => h("tr", { key: x.id }, this.td(h("span", { style: { color: "var(--soft)", fontVariantNumeric: "tabular-nums" } }, this.fdate(x.date))), this.td(h("span", { style: { display: "inline-flex", alignItems: "center", gap: "8px", fontWeight: 600 } }, h("span", { style: { width: "8px", height: "8px", borderRadius: "50%", background: x.k401 ? "var(--acc-cred)" : catColor } }), x.category, x.k401 && h("span", { style: { fontSize: "11px", fontWeight: 600, color: "var(--acc-cred)", background: "color-mix(in srgb,var(--acc-cred) 12%,#fff)", padding: "2px 7px", borderRadius: "20px" } }, "monthly auto"))), this.td(h("span", { style: { color: "var(--muted)" } }, x.note || "—")), this.td(this.fileCell(x.receipt), "center"), this.td(h("span", { style: { fontWeight: 600, fontVariantNumeric: "tabular-nums" } }, this.fmt(x.amount)), "right"), this.td(this.rowActions("deductions", x.id), "right")));
+    const rows = list.map((x: any) => h("tr", { key: x.id }, this.td(h("span", { style: { color: "var(--soft)", fontVariantNumeric: "tabular-nums" } }, this.fdate(x.date))), this.td(h("span", { style: { display: "inline-flex", alignItems: "center", gap: "8px", fontWeight: 600 } }, h("span", { style: { width: "8px", height: "8px", borderRadius: "50%", background: x.k401 ? "var(--acc-cred)" : catColor } }), x.category, x.k401 && h("span", { style: { fontSize: "11px", fontWeight: 600, color: "var(--acc-cred)", background: "color-mix(in srgb,var(--acc-cred) 12%,#fff)", padding: "2px 7px", borderRadius: "20px" } }, x.edited ? "401(k)" : "monthly auto"))), this.td(h("span", { style: { color: "var(--muted)" } }, x.note || "—")), this.td(this.fileCell(x.receipt), "center"), this.td(h("span", { style: { fontWeight: 600, fontVariantNumeric: "tabular-nums" } }, this.fmt(x.amount)), "right"), this.td(this.rowActions("deductions", x.id), "right")));
     const cmeRow = h("tr", { key: "cme-auto" }, this.td(h("span", { style: { color: "var(--muted)", fontVariantNumeric: "tabular-nums" } }, "auto")), this.td(h("span", { style: { display: "inline-flex", alignItems: "center", gap: "8px", fontWeight: 600 } }, h("span", { style: { width: "8px", height: "8px", borderRadius: "50%", background: "var(--acc-cme)" } }), "CME", h("span", { style: { fontSize: "11px", fontWeight: 600, color: "var(--acc-cme)", background: "color-mix(in srgb,var(--acc-cme) 12%,#fff)", padding: "2px 7px", borderRadius: "20px" } }, "from CME list"))), this.td(h("span", { style: { color: "var(--muted)" } }, this.state.cme.length + " activities")), this.td("—", "center"), this.td(h("span", { style: { fontWeight: 600, fontVariantNumeric: "tabular-nums" } }, this.fmt(c.cmeCost)), "right"), this.td("", "right"));
     const foot = h("tr", {}, h("td", { colSpan: 4, style: { padding: "16px 14px 4px", fontSize: "13px", fontWeight: 600, color: "var(--soft)", borderTop: "2px solid var(--border)" } }, "Total deductions YTD"), h("td", { style: { padding: "16px 14px 4px", textAlign: "right", fontWeight: 700, fontSize: "16px", fontVariantNumeric: "tabular-nums", borderTop: "2px solid var(--border)", color: "var(--acc-ded)" } }, this.fmt(c.totalDed)), h("td", { style: { borderTop: "2px solid var(--border)" } }));
     return h("div", { style: { animation: "bvFade .4s ease both" } }, this.pageHead("Deductions", this.fmt(c.totalDed) + " total · lowers your taxable income", "Add deduction", "deductions"), this.tableCard([{ label: "Date", w: "14%" }, { label: "Category", w: "32%" }, { label: "Note" }, { label: "Receipt", align: "center", w: "10%" }, { label: "Amount", align: "right", w: "13%" }, { label: "", align: "right", w: "10%" }], rows.concat([cmeRow]), foot));
@@ -688,6 +648,7 @@ class AppInner extends React.Component<AppProps, AppState> {
     );
 
     // ---- Tax profile card ----
+    const money = (key: keyof Settings) => h("div", { style: { position: "relative", display: "inline-flex", alignItems: "center", width: "100%", maxWidth: "220px" } }, h("span", { style: { position: "absolute", left: "14px", color: "var(--muted)", fontSize: "14px" } }, "$"), h("input", { type: "number", value: s[key] as number, onChange: (e: any) => this.setSetting(key, parseInt(e.target.value) || 0), style: { width: "100%", padding: "11px 14px 11px 26px", border: "1px solid var(--border)", borderRadius: "11px", fontSize: "14px", outline: "none" } }));
     const taxProfile = this.card(
       [
         h("h3", { key: "h", style: { margin: "0 0 4px", fontSize: "15px", fontWeight: 700 } }, "Tax profile"),
@@ -696,12 +657,12 @@ class AppInner extends React.Component<AppProps, AppState> {
         field("Filing status", seg([{ v: "single", label: "Single" }, { v: "married", label: "Married filing jointly" }], s.filingStatus, (v) => this.setSetting("filingStatus", v))),
         field("State", h("div", { style: { display: "inline-flex", alignItems: "center", gap: "10px", padding: "11px 16px", border: "1px solid var(--border)", borderRadius: "11px", fontSize: "14px", fontWeight: 600 } }, this.ic(["M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11z", "M12 10a2 2 0 1 0 0-.01"], { width: 15, height: 15, stroke: "var(--primary)" }), "New Jersey")),
         field("CME target (per renewal cycle)", h("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, h("input", { type: "number", value: s.cmeTarget, onChange: (e: any) => this.setSetting("cmeTarget", parseInt(e.target.value) || 0), style: { width: "110px", padding: "11px 14px", border: "1px solid var(--border)", borderRadius: "11px", fontSize: "14px" } }), h("span", { style: { color: "var(--muted)", fontSize: "13px" } }, "credit hours"))),
+        field("Other federal tax withheld — yours, annual (optional)", h("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, money("otherWithheld"), h("span", { style: { color: "var(--muted)", fontSize: "13px" } }, "e.g. a W-2 side job — subtracted from the federal amount to set aside"))),
       ],
       { marginBottom: "18px" }
     );
 
     // ---- Household income card ----
-    const money = (key: keyof Settings) => h("div", { style: { position: "relative", display: "inline-flex", alignItems: "center", width: "100%", maxWidth: "220px" } }, h("span", { style: { position: "absolute", left: "14px", color: "var(--muted)", fontSize: "14px" } }, "$"), h("input", { type: "number", value: s[key] as number, onChange: (e: any) => this.setSetting(key, parseInt(e.target.value) || 0), style: { width: "100%", padding: "11px 14px 11px 26px", border: "1px solid var(--border)", borderRadius: "11px", fontSize: "14px", outline: "none" } }));
     const c = this.calc();
     const mfj = s.filingStatus === "married";
     const half = (a: any, b: any) => h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", maxWidth: "460px" } }, a, b);
@@ -720,7 +681,7 @@ class AppInner extends React.Component<AppProps, AppState> {
     const retirementCard = this.card(
       [
         h("div", { key: "h", style: { display: "flex", alignItems: "center", gap: "9px", margin: "0 0 4px" } }, h("span", { style: { width: "9px", height: "9px", borderRadius: "3px", background: "var(--acc-cred)" } }), h("h3", { style: { margin: 0, fontSize: "15px", fontWeight: 700 } }, "Retirement — Solo 401(k)")),
-        h("p", { key: "p", style: { margin: "0 0 20px", fontSize: "13px", color: "var(--muted)", lineHeight: 1.55 } }, "A fixed contribution is posted to Deductions automatically from the current month forward. Earlier months are treated as history unless you edit them directly."),
+        h("p", { key: "p", style: { margin: "0 0 20px", fontSize: "13px", color: "var(--muted)", lineHeight: 1.55 } }, "A fixed contribution is posted to Deductions automatically each month. Change any single month’s amount on the Deductions page — edited months keep their value."),
         field("Monthly contribution", h("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, h("div", { style: { position: "relative", display: "inline-flex", alignItems: "center" } }, h("span", { style: { position: "absolute", left: "14px", color: "var(--muted)", fontSize: "14px" } }, "$"), h("input", { type: "number", value: s.solo401kMonthly, onChange: (e: any) => this.set401k(e.target.value), style: { width: "150px", padding: "11px 14px 11px 26px", border: "1px solid var(--border)", borderRadius: "11px", fontSize: "14px" } })), h("span", { style: { color: "var(--muted)", fontSize: "13px" } }, "per month"))),
         h("div", { key: "s", style: { display: "flex", alignItems: "center", gap: "9px", marginTop: "2px", padding: "11px 13px", background: "var(--surface2)", borderRadius: "11px", fontSize: "12.5px", color: "var(--soft)" } }, this.ic(["M20 12V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h6", "M4 9h16", "M15 16l2 2 4-4"], { width: 15, height: 15, stroke: "var(--acc-cred)" }), h("span", {}, this.fmt(c.k401) + " contributed year-to-date across " + this.state.deductions.filter((d) => d.k401).length + " months — this lowers your taxable income in the estimate.")),
       ],
@@ -750,7 +711,7 @@ class AppInner extends React.Component<AppProps, AppState> {
     const bullets = [
       "Annualization is a simple ratable projection of YTD actuals (the spirit of IRS Form 2210’s annualized-income method). If your income is uneven across the year, the projection — and installments — shift as real numbers replace it.",
       "SE tax models the real structure: 12.4% Social Security capped at the " + this.fmt(SS_WAGE_BASE) + " wage base, 2.9% Medicare uncapped, plus the 0.9% Additional Medicare surtax above " + this.fmt(MEDICARE_ADDL[s.filingStatus]) + (mfj ? " (joint threshold, spouse wages count toward it)" : "") + ".",
-      "The Solo 401(k) reduces federal income tax as an above-the-line adjustment — it does NOT reduce SE tax, and New Jersey allows no deduction for it. NJ also allows no standard deduction and no ½-SE deduction, only a " + this.fmt(c.njExempt) + " personal exemption.",
+      "The Solo 401(k) reduces federal income tax as an above-the-line adjustment — it does NOT reduce SE tax. New Jersey also allows qualified self-employed 401(k) contributions to be deducted (N.J.S.A. 54A:6-21, up to federal limits), but NJ allows no standard deduction and no ½-SE deduction, only a " + this.fmt(c.njExempt) + " personal exemption. The deductible ½ SE is half of Schedule SE tax only — the 0.9% Additional Medicare surtax is never deductible.",
       "Federal figures per IRS Rev. Proc. 2025-32 (tax year 2026): " + this.fmt(fs.std) + " standard deduction, " + fsLabel + " brackets. NJ statutory brackets by filing status.",
       mfj ? "Spouse wages (" + this.fmt(c.spouseWages) + ", annual) stack on top of your annualized business income, so your dollars are taxed at the joint marginal bracket. Spouse withholding (" + this.fmt(c.spouseFedWH + c.spouseStateWH) + ") is subtracted so you set aside only your share." : "Filing as Single — no spouse income is included. Switch to Married filing jointly above to model a household return.",
       "Excludes the QBI deduction (phases out for physicians as a specified-service business above ~" + this.fmt(mfj ? 403500 : 201775) + " taxable). Erring toward setting aside a little too much is the safer mistake.",
@@ -758,7 +719,7 @@ class AppInner extends React.Component<AppProps, AppState> {
     return this.card([
       h("div", { key: "h", style: { display: "flex", alignItems: "center", gap: "9px", margin: "0 0 4px" } }, h("span", { style: { width: "9px", height: "9px", borderRadius: "3px", background: "var(--primary)" } }), h("h3", { style: { margin: 0, fontSize: "15px", fontWeight: 700 } }, "How your estimate is calculated")),
       h("p", { key: "p", style: { margin: "0 0 12px", fontSize: "13px", color: "var(--muted)", lineHeight: 1.55 } }, "A transparent walk-through of the model, with your current numbers plugged in. Updates live as you edit records and settings."),
-      h("div", { key: "steps" }, step(1, "Annualize YTD actuals", "(" + this.fmt(c.ytd) + " income  −  " + this.fmt(c.totalDed - c.k401) + " business deductions)  ×  365 ÷ " + c.doy + " days elapsed", this.fmt(c.annNet)), step(2, "Self-employment tax", "12.4% × min(" + this.fmt(c.seBase) + " base, " + this.fmt(SS_WAGE_BASE) + " cap)  +  2.9% × base" + (c.addlMed > 0 ? "  +  0.9% surtax " + this.fmt(c.addlMed) : ""), this.fmt(c.seTax), "var(--acc-ded)"), step(3, mfj ? "Household taxable income (federal)" : "Taxable income (federal)", this.fmt(c.annNet) + "  −  ½ SE " + this.fmt(c.seTax / 2) + "  −  401(k) " + this.fmt(c.annK401) + (mfj ? "  +  " + this.fmt(c.spouseWages) + " spouse" : "") + "  −  " + this.fmt(fs.std) + " std deduction", this.fmt(c.householdTaxable)), step(4, "Federal income tax", "brackets(" + this.fmt(c.householdTaxable) + ") = " + this.fmt(c.fedTaxTotal) + (mfj ? "   −  " + this.fmt(c.spouseFedWH) + " spouse withheld" : ""), this.fmt(c.fedTax), "var(--acc-inc)"), step(5, "NJ state income tax", "brackets(" + this.fmt(c.njBase) + ") = " + this.fmt(c.stateTaxTotal) + (mfj ? "   −  " + this.fmt(c.spouseStateWH) + " spouse withheld" : "") + "   · no std deduction, ½-SE or 401(k) in NJ", this.fmt(c.stateTax), "var(--acc-cme)"), step(6, "Projected full-year tax", this.fmt(c.seTax) + "  +  " + this.fmt(c.fedTax) + "  +  " + this.fmt(c.stateTax), this.fmt(c.total), "var(--primary)"), step(7, "Level quarterly installment", this.fmt(c.total) + "  ÷  4  — equal installments; passing a deadline never raises the others", this.fmt(c.reqPer)), step(8, "Remaining deadlines", this.fmt(c.reqPer) + " installment  " + (c.shortfall >= 0 ? "+" : "−") + "  " + this.fmt(Math.abs(c.shortfall)) + " " + (c.shortfall >= 0 ? "catch-up" : "overpayment") + " ÷ " + c.remainingQ + " remaining", this.fmt(c.perRemaining))),
+      h("div", { key: "steps" }, step(1, "Annualize YTD actuals", "(" + this.fmt(c.ytd) + " income  −  " + this.fmt(c.totalDed - c.k401) + " business deductions)  ×  365 ÷ " + c.doy + " days elapsed", this.fmt(c.annNet)), step(2, "Self-employment tax", "12.4% × min(" + this.fmt(c.seBase) + " base, " + this.fmt(SS_WAGE_BASE) + " cap)  +  2.9% × base" + (c.addlMed > 0 ? "  +  0.9% surtax " + this.fmt(c.addlMed) : ""), this.fmt(c.seTax), "var(--acc-ded)"), step(3, mfj ? "Household taxable income (federal)" : "Taxable income (federal)", this.fmt(c.annNet) + "  −  ½ SE " + this.fmt(c.seCore / 2) + " (excl. surtax)" + "  −  401(k) " + this.fmt(c.annK401) + (mfj ? "  +  " + this.fmt(c.spouseWages) + " spouse" : "") + "  −  " + this.fmt(fs.std) + " std deduction", this.fmt(c.householdTaxable)), step(4, "Federal income tax", "brackets(" + this.fmt(c.householdTaxable) + ") = " + this.fmt(c.fedTaxTotal) + (mfj ? "   −  " + this.fmt(c.spouseFedWH) + " spouse withheld" : "") + (c.otherWithheld > 0 ? "   −  " + this.fmt(c.otherWithheld) + " other withheld" : ""), this.fmt(c.fedTax), "var(--acc-inc)"), step(5, "NJ state income tax", "brackets(" + this.fmt(c.njBase) + ") = " + this.fmt(c.stateTaxTotal) + (mfj ? "   −  " + this.fmt(c.spouseStateWH) + " spouse withheld" : "") + "   · 401(k) deducted; no std deduction or ½-SE in NJ", this.fmt(c.stateTax), "var(--acc-cme)"), step(6, "Projected full-year tax", this.fmt(c.seTax) + "  +  " + this.fmt(c.fedTax) + "  +  " + this.fmt(c.stateTax), this.fmt(c.total), "var(--primary)"), step(7, "Level quarterly installment", this.fmt(c.total) + "  ÷  4  — equal installments; passing a deadline never raises the others", this.fmt(c.reqPer)), step(8, "Remaining deadlines", this.fmt(c.reqPer) + " installment  " + (c.shortfall >= 0 ? "+" : "−") + "  " + this.fmt(Math.abs(c.shortfall)) + " " + (c.shortfall >= 0 ? "catch-up" : "overpayment") + " ÷ " + c.remainingQ + " remaining", this.fmt(c.perRemaining))),
       h("div", { key: "brk", style: { display: "flex", gap: "14px", margin: "20px 0 4px", flexWrap: "wrap" } }, bracketTable("Federal brackets — " + fsLabel + " (" + YEAR + ")", fs.b), bracketTable("New Jersey brackets — " + fsLabel, njB)),
       h("div", { key: "ca", style: { marginTop: "18px", paddingTop: "16px", borderTop: "1px solid var(--line)" } }, h("div", { style: { fontSize: "12px", fontWeight: 700, color: "var(--soft)", marginBottom: "10px", textTransform: "uppercase", letterSpacing: ".4px" } }, "Assumptions & caveats"), h("div", { style: { display: "flex", flexDirection: "column", gap: "9px" } }, bullets.map((b, i) => h("div", { key: i, style: { display: "flex", gap: "9px", fontSize: "12.5px", color: "var(--soft)", lineHeight: 1.5 } }, h("span", { style: { flexShrink: 0, color: "var(--primary)", marginTop: "1px" } }, this.ic(["M20 6L9 17l-5-5"], { width: 14, height: 14 })), h("span", {}, b))))),
     ]);

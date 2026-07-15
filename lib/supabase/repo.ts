@@ -10,6 +10,7 @@ import type {
   Income,
   Settings,
 } from "../types";
+import { isK401 } from "../tax";
 
 const BUCKET = "documents";
 
@@ -37,8 +38,6 @@ export class Repo {
     if (patch.cycleEnds !== undefined) map.cycle_ends = patch.cycleEnds;
     if (patch.solo401kMonthly !== undefined)
       map.solo401k_monthly = patch.solo401kMonthly;
-    if (patch.solo401kEffectiveFrom !== undefined)
-      map.solo401k_effective_from = patch.solo401kEffectiveFrom;
     if (patch.physicianName !== undefined)
       map.physician_name = patch.physicianName;
     if (patch.spouseWages !== undefined) map.spouse_wages = patch.spouseWages;
@@ -81,7 +80,10 @@ export class Repo {
       note: rec.note ?? "",
       receipt: fileCol(rec.receipt),
     };
-    if (rec.k401) {
+    // A row saved through this path with the 401(k) flag OR category is a
+    // Solo 401(k) contribution the user touched — flag it and mark it edited
+    // so the monthly auto-sync neither duplicates nor overwrites it.
+    if (isK401(rec)) {
       row.k401 = true;
       row.edited = true;
     }
@@ -97,26 +99,9 @@ export class Repo {
     return data!.id as string;
   }
 
-  async saveAuto401k(rec: { id?: string; date: string; amount: number }) {
-    const row = {
-      date: rec.date,
-      amount: rec.amount,
-      category: "Retirement - Solo 401(k)",
-      note: "Monthly contribution",
-      receipt: null,
-      k401: true,
-      edited: false,
-    };
-    if (rec.id) {
-      await this.supabase.from("deductions").update(row).eq("id", rec.id);
-      return rec.id;
-    }
-    const { data } = await this.supabase
-      .from("deductions")
-      .insert({ user_id: this.userId, ...row })
-      .select("id")
-      .single();
-    return data!.id as string;
+  /** Amount-only update for auto 401(k) rows — leaves k401/edited untouched. */
+  async updateDeductionAmount(id: string, amount: number) {
+    await this.supabase.from("deductions").update({ amount }).eq("id", id);
   }
 
   // ---- cme ----
