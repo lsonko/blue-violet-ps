@@ -17,7 +17,7 @@ import {
   SEED_QUARTER_PAYMENTS,
   SEED_SETTINGS,
 } from "./seed";
-import { isK401, taxYear } from "./tax";
+import { isK401, K401_CATEGORY, taxYear } from "./tax";
 
 // A jsonb file column is either null, an "on file" marker, or a real FileRef.
 type FileCol = null | { onFile: boolean } | FileRef;
@@ -61,8 +61,9 @@ export async function getAppData(
 
   const settings = mapSettings(settingsRow as Record<string, unknown>);
 
-  // Ensure a monthly Solo 401(k) deduction exists for every month up to now.
-  await sync401k(supabase, userId, settings.solo401kMonthly, false);
+  // Create this month's Solo 401(k) deduction if it does not already exist.
+  // Never backfill missing prior months during app load.
+  await sync401k(supabase, userId, settings.solo401kMonthly);
 
   const [income, deductions, cme, credentials, quarters] = await Promise.all([
     supabase.from("income").select("*").eq("user_id", userId),
@@ -184,60 +185,43 @@ async function seedUser(supabase: SupabaseClient, userId: string) {
 }
 
 /**
- * Ensure a Solo 401(k) deduction row exists for each month Jan..current of the
- * current year. When `updateUnedited` is true, untouched monthly rows are reset
- * to the new default; edited rows keep their own amount.
+ * Ensure the current calendar month has one Solo 401(k) deduction row.
+ * App load is the monthly trigger, so this intentionally never backfills prior
+ * months and never changes an existing month's amount.
  */
 export async function sync401k(
   supabase: SupabaseClient,
   userId: string,
   monthly: number,
-  updateUnedited: boolean
+  ref: Date = new Date()
 ) {
-  const now = new Date();
-  const year = now.getFullYear();
-  const upTo = now.getMonth(); // 0-based; include through current month
+  const year = ref.getFullYear();
+  const month = ref.getMonth() + 1;
+  const ym = `${year}-${String(month).padStart(2, "0")}`;
+  if (monthly <= 0) return;
 
-  // Match by flag OR category so a manually entered "Retirement — Solo 401(k)"
-  // row counts as that month's contribution instead of getting a duplicate
-  // auto row. (PostgREST .or() can't safely quote the parens in the category,
-  // so filter client-side.)
+  // Match by flag OR category so a manual contribution in the current month
+  // prevents a duplicate auto row.
   const { data: existing } = await supabase
     .from("deductions")
-    .select("id, date, edited, k401, category")
-    .eq("user_id", userId);
+    .select("k401, category")
+    .eq("user_id", userId)
+    .gte("date", `${ym}-01`)
+    .lte("date", `${ym}-31`);
 
-  const byMonth = new Map<string, { id: string; edited: boolean }>();
-  for (const e of existing ?? []) {
-    if (!isK401(e as { k401?: boolean; category?: string })) continue;
-    byMonth.set(String(e.date).slice(0, 7), { id: e.id, edited: !!e.edited });
-  }
+  const currentMonthExists = (existing ?? []).some((row) =>
+    isK401(row as { k401?: boolean; category?: string })
+  );
+  if (currentMonthExists) return;
 
-  const toInsert: Record<string, unknown>[] = [];
-  const toUpdate: string[] = [];
-  for (let m = 0; m <= upTo; m++) {
-    const ym = `${year}-${String(m + 1).padStart(2, "0")}`;
-    const found = byMonth.get(ym);
-    if (!found) {
-      toInsert.push({
-        user_id: userId,
-        date: `${ym}-15`,
-        amount: monthly,
-        category: "Retirement — Solo 401(k)",
-        note: "Monthly contribution",
-        receipt: null,
-        k401: true,
-        edited: false,
-      });
-    } else if (updateUnedited && !found.edited) {
-      toUpdate.push(found.id);
-    }
-  }
-
-  if (toInsert.length) await supabase.from("deductions").insert(toInsert);
-  if (toUpdate.length)
-    await supabase
-      .from("deductions")
-      .update({ amount: monthly })
-      .in("id", toUpdate);
+  await supabase.from("deductions").insert({
+    user_id: userId,
+    date: `${ym}-01`,
+    amount: monthly,
+    category: K401_CATEGORY,
+    note: "Monthly contribution",
+    receipt: null,
+    k401: true,
+    edited: false,
+  });
 }

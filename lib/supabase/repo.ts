@@ -99,11 +99,6 @@ export class Repo {
     return data!.id as string;
   }
 
-  /** Amount-only update for auto 401(k) rows — leaves k401/edited untouched. */
-  async updateDeductionAmount(id: string, amount: number) {
-    await this.supabase.from("deductions").update({ amount }).eq("id", id);
-  }
-
   // ---- cme ----
   async saveCme(rec: Partial<Cme> & { id?: string }) {
     const row = {

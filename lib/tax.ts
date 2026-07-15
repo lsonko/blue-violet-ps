@@ -199,10 +199,19 @@ export function calc(data: AppData, ref: Date = today()): CalcResult {
   const factor = 365 / doy;
   const annNet = ytdNet * factor;
   const annIncome = ytd * factor;
-  const k401Months = new Set(
-    deductions.filter(isK401).map((d) => (d.date || "").slice(0, 7))
+  // Project only months after the current month. Missing past months are not
+  // treated as if the current setting had applied retroactively.
+  const futureK401Months = new Set(
+    deductions
+      .filter(isK401)
+      .map((d) => (d.date || "").slice(0, 7))
+      .filter((ym) => ym > `${year}-${String(ref.getMonth() + 1).padStart(2, "0")}`)
   ).size;
-  const annK401 = k401 + set.solo401kMonthly * Math.max(0, 12 - k401Months);
+  const remainingMonths =
+    year === ref.getFullYear() ? Math.max(0, 11 - ref.getMonth()) : 0;
+  const annK401 =
+    k401 +
+    set.solo401kMonthly * Math.max(0, remainingMonths - futureK401Months);
   const mfj = set.filingStatus === "married";
   const spouseWages = mfj ? set.spouseWages || 0 : 0;
   const spouseFedWH = mfj ? set.spouseFedWithheld || 0 : 0;
